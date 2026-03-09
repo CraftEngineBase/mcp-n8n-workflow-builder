@@ -346,8 +346,11 @@ export function bearerAuthMiddleware(req: Request, res: Response, next: NextFunc
 // ---------------------------------------------------------------------------
 
 export function mountOAuthRoutes(app: Application): void {
-  // Express 5 needs urlencoded for form POST from authorize page
-  app.use('/authorize', express.urlencoded({ extended: false }));
+  // OAuth endpoints receive application/x-www-form-urlencoded
+  const urlencodedParser = express.urlencoded({ extended: false });
+  app.use('/authorize', urlencodedParser);
+  app.use('/token', urlencodedParser);
+  app.use('/register', urlencodedParser);
 
   app.get('/.well-known/oauth-protected-resource', handleProtectedResourceMetadata);
   app.get('/.well-known/oauth-authorization-server', handleAuthServerMetadata);
