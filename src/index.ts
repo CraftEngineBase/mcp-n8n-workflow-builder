@@ -6,11 +6,14 @@ dotenv.config();
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import express, { Request, Response, Application } from 'express';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
+import express, { Request, Response } from 'express';
 import cors from 'cors';
 import * as http from 'http';
-import { 
-  CallToolRequestSchema, 
+import {
+  CallToolRequestSchema,
   ListToolsRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
@@ -24,7 +27,7 @@ import logger from './utils/logger';
 import { WorkflowInput, LegacyWorkflowConnection } from './types/workflow';
 import * as promptsService from './services/promptsService';
 import { Prompt } from './types/prompts';
-import { mountOAuthRoutes, bearerAuthMiddleware } from './auth/oauth';
+import { oauthProvider, createAuthorizePostHandler } from './auth/oauth';
 
 // Определение типа для результата вызова инструмента
 interface ToolCallResult {
@@ -54,7 +57,6 @@ class N8NWorkflowServer {
     this.setupToolHandlers();
     this.setupResourceHandlers();
     this.setupPromptHandlers();
-    this.setupNotificationHandlers();
     this.server.onerror = (error: any) => this.log('error', `Server error: ${error.message || error}`);
   }
 
@@ -1659,30 +1661,6 @@ class N8NWorkflowServer {
     });
   }
 
-  // Setup notification handlers for MCP protocol notifications
-  private setupNotificationHandlers() {
-    // Initialize notification handlers map if it doesn't exist
-    this.server['_notificationHandlers'] = this.server['_notificationHandlers'] || new Map();
-
-    // Handle notifications/initialized - sent by MCP clients after connection
-    this.server['_notificationHandlers'].set('notifications/initialized', async (notification: any) => {
-      this.log('info', 'MCP client initialized successfully');
-      // No response needed for notifications per JSON-RPC 2.0 spec
-    });
-
-    // Handle notifications/cancelled - sent when client cancels an operation
-    this.server['_notificationHandlers'].set('notifications/cancelled', async (notification: any) => {
-      this.log('info', 'Client cancelled operation', notification.params);
-      // No response needed for notifications
-    });
-
-    // Handle notifications/progress - progress updates from client
-    this.server['_notificationHandlers'].set('notifications/progress', async (notification: any) => {
-      this.log('debug', 'Progress notification received', notification.params);
-      // No response needed for notifications
-    });
-  }
-
   // Запуск MCP сервера
   async run() {
     // ВАЖНО: Не добавлять вывод в консоль здесь, так как это препятствует работе JSON-RPC через stdin/stdout
@@ -1704,15 +1682,6 @@ class N8NWorkflowServer {
       } else {
         // MCP subprocess mode - use stdin/stdout transport
         const transport = new StdioServerTransport();
-        
-        // Also start HTTP server for debugging
-        const port = parseInt(process.env.PORT || process.env.MCP_PORT || '3456', 10);
-        this.startHttpServer(port).catch(error => {
-          // Don't fail if HTTP server can't start in MCP mode
-          this.log('warn', `HTTP server failed to start: ${error.message}`);
-        });
-        
-        // Connect to MCP transport
         await this.server.connect(transport);
       }
     } catch (error) {
@@ -1726,73 +1695,61 @@ class N8NWorkflowServer {
     return new Promise((resolve, reject) => {
       try {
         const app = express();
-        
-        // Настройка CORS
+
+        // CORS
         app.use(cors());
-        
-        // Парсинг JSON
+
+        // JSON body parsing
         app.use(express.json({ limit: '50mb' }));
 
-        // OAuth 2.0 routes (must be before bearer auth middleware)
-        mountOAuthRoutes(app);
+        // URL-encoded body parsing (for OAuth authorize POST form)
+        app.use(express.urlencoded({ extended: false }));
 
-        // Эндпоинт для проверки работы сервера
-        app.get('/health', (req: Request, res: Response) => {
+        // Health check (public, before auth)
+        app.get('/health', (_req: Request, res: Response) => {
           res.json({
             status: 'ok',
             message: 'MCP server is running',
             version: '0.9.0'
           });
         });
-        
-        // Обработчик для MCP запросов
-        app.post('/mcp', bearerAuthMiddleware, (req: Request, res: Response) => {
-          try {
-            this.log('debug', 'Received MCP request', req.body);
 
-            // Обработка MCP запроса
-            this.handleJsonRpcMessage(req.body).then(result => {
-              // Per JSON-RPC 2.0 spec: notifications return null and should get 204 No Content
-              if (result === null) {
-                this.log('debug', 'Notification processed, sending 204 No Content');
-                res.status(204).end();
-              } else {
-                this.log('debug', 'Sending MCP response', result);
-                res.json(result);
-              }
-            }).catch((error: Error) => {
-              this.log('error', 'Error handling MCP request', error);
-              res.status(500).json({
-                jsonrpc: '2.0',
-                error: {
-                  code: -32603,
-                  message: 'Internal server error',
-                  data: error.message
-                },
-                id: req.body?.id || null
-              });
-            });
-          } catch (error) {
-            this.log('error', 'Error processing MCP request', error);
-            res.status(500).json({
-              jsonrpc: '2.0',
-              error: {
-                code: -32603,
-                message: 'Internal server error',
-                data: error instanceof Error ? error.message : 'Unknown error'
-              },
-              id: req.body?.id || null
-            });
-          }
+        // Custom POST /authorize handler for secret-based form submission
+        // Must be BEFORE mcpAuthRouter so it intercepts the form POST
+        app.post('/authorize', createAuthorizePostHandler(oauthProvider));
+
+        // SDK OAuth routes: well-known metadata, GET /authorize, /register, /token
+        const serverUrl = process.env.MCP_SERVER_URL;
+        if (!serverUrl) throw new Error('MCP_SERVER_URL environment variable is required');
+
+        app.use(mcpAuthRouter({
+          provider: oauthProvider,
+          issuerUrl: new URL(serverUrl),
+        }));
+
+        // Bearer auth middleware for /mcp endpoint
+        const bearerAuth = requireBearerAuth({ verifier: oauthProvider });
+
+        // Streamable HTTP transport for MCP
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: undefined, // stateless
         });
-        
-        // Запуск HTTP-сервера
+
+        // Connect the MCP server to the transport
+        this.server.connect(transport);
+
+        // Route all MCP requests through bearer auth + transport
+        app.all('/mcp', bearerAuth, (req: Request, res: Response) => {
+          this.log('debug', 'Received MCP request', req.method);
+          transport.handleRequest(req as any, res as any, req.body);
+        });
+
+        // Start HTTP server
         const httpServer = http.createServer(app);
 
         httpServer.on('error', (error: NodeJS.ErrnoException) => {
           if (error.code === 'EADDRINUSE') {
             this.log('info', `Port ${port} is already in use. Assuming another instance is already running.`);
-            // Резолвим промис для graceful handling
             resolve();
           } else {
             this.log('error', `HTTP server error: ${error.message}`);
@@ -1809,56 +1766,6 @@ class N8NWorkflowServer {
         reject(error);
       }
     });
-  }
-  
-  private async handleJsonRpcMessage(request: any): Promise<any> {
-    const { method, id } = request;
-
-    // Per JSON-RPC 2.0 spec: notifications don't have an 'id' field
-    const isNotification = id === undefined || id === null;
-
-    if (isNotification) {
-      // Handle notification - look in notification handlers
-      const notificationHandler = this.server['_notificationHandlers']?.get(method);
-
-      if (!notificationHandler) {
-        // Per JSON-RPC 2.0: no error response for notifications with unknown methods
-        this.log('warn', `Notification handler not found for method '${method}', ignoring`);
-        return null;
-      }
-
-      try {
-        // Execute notification handler - no response expected
-        await notificationHandler(request);
-        return null; // No response for notifications
-      } catch (error) {
-        // Per JSON-RPC 2.0: errors in notification handlers should be logged but not returned
-        this.log('error', `Notification handler error for '${method}': ${error instanceof Error ? error.message : String(error)}`);
-        return null;
-      }
-    } else {
-      // Handle request - look in request handlers
-      const handler = this.server['_requestHandlers'].get(method);
-
-      if (!handler) {
-        throw new McpError(ErrorCode.MethodNotFound, `Method '${method}' not found`);
-      }
-
-      try {
-        // Execute request handler and return response
-        const result = await handler(request);
-
-        // Return result in JSON-RPC 2.0 format
-        return {
-          jsonrpc: '2.0',
-          result,
-          id
-        };
-      } catch (error) {
-        this.log('error', `Handler error: ${error instanceof Error ? error.message : String(error)}`);
-        throw error;
-      }
-    }
   }
 }
 
