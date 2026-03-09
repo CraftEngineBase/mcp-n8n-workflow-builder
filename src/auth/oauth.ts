@@ -81,13 +81,9 @@ class InMemoryClientsStore implements OAuthRegisteredClientsStore {
     return registeredClients.get(clientId);
   }
 
-  async registerClient(client: Omit<OAuthClientInformationFull, 'client_id' | 'client_id_issued_at'>): Promise<OAuthClientInformationFull> {
-    const clientId = crypto.randomUUID();
-    const fullClient: OAuthClientInformationFull = {
-      ...client,
-      client_id: clientId,
-      client_id_issued_at: Math.floor(Date.now() / 1000),
-    };
+  async registerClient(client: any): Promise<OAuthClientInformationFull> {
+    const clientId = client.client_id ?? crypto.randomUUID();
+    const fullClient = { ...client, client_id: clientId };
     registeredClients.set(clientId, fullClient);
     return fullClient;
   }

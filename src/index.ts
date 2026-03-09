@@ -1695,6 +1695,7 @@ class N8NWorkflowServer {
     return new Promise((resolve, reject) => {
       try {
         const app = express();
+        app.set('trust proxy', 1); // Trust Railway's reverse proxy for correct client IP extraction
 
         // CORS
         app.use(cors());
