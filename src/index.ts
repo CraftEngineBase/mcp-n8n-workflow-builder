@@ -24,6 +24,7 @@ import logger from './utils/logger';
 import { WorkflowInput, LegacyWorkflowConnection } from './types/workflow';
 import * as promptsService from './services/promptsService';
 import { Prompt } from './types/prompts';
+import { mountOAuthRoutes, bearerAuthMiddleware } from './auth/oauth';
 
 // Определение типа для результата вызова инструмента
 interface ToolCallResult {
@@ -1691,7 +1692,7 @@ class N8NWorkflowServer {
       
       if (isStandaloneMode) {
         // Standalone mode - only run HTTP server
-        const port = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3456;
+        const port = parseInt(process.env.PORT || process.env.MCP_PORT || '3456', 10);
         await this.startHttpServer(port);
         this.log('info', `MCP server running in standalone mode on port ${port}`);
         
@@ -1705,7 +1706,7 @@ class N8NWorkflowServer {
         const transport = new StdioServerTransport();
         
         // Also start HTTP server for debugging
-        const port = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3456;
+        const port = parseInt(process.env.PORT || process.env.MCP_PORT || '3456', 10);
         this.startHttpServer(port).catch(error => {
           // Don't fail if HTTP server can't start in MCP mode
           this.log('warn', `HTTP server failed to start: ${error.message}`);
@@ -1731,7 +1732,10 @@ class N8NWorkflowServer {
         
         // Парсинг JSON
         app.use(express.json({ limit: '50mb' }));
-        
+
+        // OAuth 2.0 routes (must be before bearer auth middleware)
+        mountOAuthRoutes(app);
+
         // Эндпоинт для проверки работы сервера
         app.get('/health', (req: Request, res: Response) => {
           res.json({
@@ -1742,7 +1746,7 @@ class N8NWorkflowServer {
         });
         
         // Обработчик для MCP запросов
-        app.post('/mcp', (req: Request, res: Response) => {
+        app.post('/mcp', bearerAuthMiddleware, (req: Request, res: Response) => {
           try {
             this.log('debug', 'Received MCP request', req.body);
 
