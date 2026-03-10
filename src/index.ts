@@ -1750,7 +1750,7 @@ class N8NWorkflowServer {
 
         // MCP request handler (shared between /mcp and / routes)
         const mcpHandler = async (req: Request, res: Response) => {
-          this.log('debug', 'Received MCP request', req.method);
+          this.log('info', `MCP handler reached: ${req.method} ${req.path}`);
           try {
             await transport.handleRequest(req as any, res as any, req.body);
           } catch (error) {

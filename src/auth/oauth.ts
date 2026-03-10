@@ -4,6 +4,7 @@ import { OAuthServerProvider, AuthorizationParams } from '@modelcontextprotocol/
 import { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import { OAuthClientInformationFull, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -152,6 +153,7 @@ class SecretOAuthProvider implements OAuthServerProvider {
       clientId: client.client_id,
       expiresAt: Date.now() + ACCESS_TOKEN_TTL,
     });
+    console.error(`[oauth] Token issued: ${token.substring(0, 8)}... for client ${client.client_id} (${accessTokens.size} tokens stored)`);
 
     return {
       access_token: token,
@@ -165,12 +167,17 @@ class SecretOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
+    const tokenPreview = token.substring(0, 8) + '...';
+    console.error(`[oauth] verifyAccessToken called for token ${tokenPreview} (${accessTokens.size} tokens stored)`);
+
     const stored = accessTokens.get(token);
     if (!stored || stored.expiresAt < Date.now()) {
       if (stored) accessTokens.delete(token);
-      throw new Error('Invalid or expired token');
+      console.error(`[oauth] Token ${tokenPreview} rejected: ${stored ? 'expired' : 'not found'}`);
+      throw new InvalidTokenError('Invalid or expired token');
     }
 
+    console.error(`[oauth] Token ${tokenPreview} verified for client ${stored.clientId}`);
     return {
       token,
       clientId: stored.clientId,
