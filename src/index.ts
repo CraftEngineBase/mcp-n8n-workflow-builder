@@ -11,6 +11,7 @@ import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import express, { Request, Response } from 'express';
 import cors from 'cors';
+import crypto from 'crypto';
 import * as http from 'http';
 import {
   CallToolRequestSchema,
@@ -1691,6 +1692,21 @@ class N8NWorkflowServer {
     }
   }
   
+  private createMcpServer(): InstanceType<typeof Server> {
+    const server = new Server(
+      { name: 'n8n-workflow-builder', version: '0.9.0' },
+      { capabilities: { tools: {}, resources: {}, prompts: {} } }
+    );
+    const originalServer = this.server;
+    this.server = server;
+    this.setupToolHandlers();
+    this.setupResourceHandlers();
+    this.setupPromptHandlers();
+    this.server = originalServer;
+    server.onerror = (error: any) => this.log('error', `Server error: ${error.message || error}`);
+    return server;
+  }
+
   private async startHttpServer(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
@@ -1740,19 +1756,56 @@ class N8NWorkflowServer {
           resourceMetadataUrl: new URL('/.well-known/oauth-protected-resource', serverUrl).href,
         });
 
-        // Streamable HTTP transport for MCP
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: undefined, // stateless
-        });
-
-        // Connect the MCP server to the transport
-        this.server.connect(transport);
+        // Session management for stateful MCP connections
+        const sessions = new Map<string, {
+          transport: StreamableHTTPServerTransport;
+          server: InstanceType<typeof Server>;
+        }>();
 
         // MCP request handler (shared between /mcp and / routes)
         const mcpHandler = async (req: Request, res: Response) => {
-          this.log('info', `MCP handler reached: ${req.method} ${req.path}`);
+          const sessionId = req.headers['mcp-session-id'] as string | undefined;
+          this.log('info', `MCP handler: ${req.method} ${req.path} (session: ${sessionId || 'new'})`);
+
           try {
+            let transport: StreamableHTTPServerTransport;
+            let server: InstanceType<typeof Server>;
+
+            if (sessionId && sessions.has(sessionId)) {
+              // Existing session — reuse transport
+              const session = sessions.get(sessionId)!;
+              transport = session.transport;
+              server = session.server;
+            } else if (!sessionId) {
+              // New session — create fresh server + transport pair
+              server = this.createMcpServer();
+              transport = new StreamableHTTPServerTransport({
+                sessionIdGenerator: () => crypto.randomUUID(),
+              });
+
+              transport.onclose = () => {
+                const sid = transport.sessionId;
+                if (sid) {
+                  this.log('info', `[transport] Session ${sid} closed, cleaning up`);
+                  sessions.delete(sid);
+                }
+              };
+
+              await server.connect(transport);
+            } else {
+              // Invalid/expired session ID
+              this.log('warn', `[transport] Unknown session ${sessionId}`);
+              res.status(404).json({ error: 'Session not found' });
+              return;
+            }
+
             await transport.handleRequest(req as any, res as any, req.body);
+
+            // After handling init request, the transport now has a sessionId — store it
+            if (!sessionId && transport.sessionId) {
+              sessions.set(transport.sessionId, { transport, server });
+              this.log('info', `[transport] New session created: ${transport.sessionId}`);
+            }
           } catch (error) {
             this.log('error', `MCP request error: ${error instanceof Error ? error.message : String(error)}`);
             if (!res.headersSent) {
