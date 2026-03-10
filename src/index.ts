@@ -1706,6 +1706,12 @@ class N8NWorkflowServer {
         // URL-encoded body parsing (for OAuth authorize POST form)
         app.use(express.urlencoded({ extended: false }));
 
+        // Request logging
+        app.use((req, _res, next) => {
+          this.log('info', `${req.method} ${req.path}`);
+          next();
+        });
+
         // Health check (public, before auth)
         app.get('/health', (_req: Request, res: Response) => {
           res.json({
@@ -1729,7 +1735,10 @@ class N8NWorkflowServer {
         }));
 
         // Bearer auth middleware for /mcp endpoint
-        const bearerAuth = requireBearerAuth({ verifier: oauthProvider });
+        const bearerAuth = requireBearerAuth({
+          verifier: oauthProvider,
+          resourceMetadataUrl: new URL('/.well-known/oauth-protected-resource', serverUrl).href,
+        });
 
         // Streamable HTTP transport for MCP
         const transport = new StreamableHTTPServerTransport({
@@ -1740,9 +1749,24 @@ class N8NWorkflowServer {
         this.server.connect(transport);
 
         // Route all MCP requests through bearer auth + transport
-        app.all('/mcp', bearerAuth, (req: Request, res: Response) => {
+        app.all('/mcp', bearerAuth, async (req: Request, res: Response) => {
           this.log('debug', 'Received MCP request', req.method);
-          transport.handleRequest(req as any, res as any, req.body);
+          try {
+            await transport.handleRequest(req as any, res as any, req.body);
+          } catch (error) {
+            this.log('error', `MCP request error: ${error instanceof Error ? error.message : String(error)}`);
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Internal server error' });
+            }
+          }
+        });
+
+        // Global error handler
+        app.use((err: any, _req: any, res: any, _next: any) => {
+          this.log('error', `Express error: ${err.message || err}`);
+          if (!res.headersSent) {
+            res.status(500).json({ error: 'Internal server error' });
+          }
         });
 
         // Start HTTP server
