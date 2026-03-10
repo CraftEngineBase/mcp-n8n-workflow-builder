@@ -7,7 +7,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import express, { Request, Response } from 'express';
 import cors from 'cors';
@@ -1732,13 +1732,12 @@ class N8NWorkflowServer {
         app.use(mcpAuthRouter({
           provider: oauthProvider,
           issuerUrl: new URL(serverUrl),
-          resourceServerUrl: new URL('/mcp', serverUrl),
         }));
 
-        // Bearer auth middleware for /mcp endpoint
+        // Bearer auth middleware for MCP endpoints
         const bearerAuth = requireBearerAuth({
           verifier: oauthProvider,
-          resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(new URL('/mcp', serverUrl)),
+          resourceMetadataUrl: new URL('/.well-known/oauth-protected-resource', serverUrl).href,
         });
 
         // Streamable HTTP transport for MCP
@@ -1749,8 +1748,8 @@ class N8NWorkflowServer {
         // Connect the MCP server to the transport
         this.server.connect(transport);
 
-        // Route all MCP requests through bearer auth + transport
-        app.all('/mcp', bearerAuth, async (req: Request, res: Response) => {
+        // MCP request handler (shared between /mcp and / routes)
+        const mcpHandler = async (req: Request, res: Response) => {
           this.log('debug', 'Received MCP request', req.method);
           try {
             await transport.handleRequest(req as any, res as any, req.body);
@@ -1760,7 +1759,12 @@ class N8NWorkflowServer {
               res.status(500).json({ error: 'Internal server error' });
             }
           }
-        });
+        };
+
+        // Route MCP requests through bearer auth + transport
+        app.all('/mcp', bearerAuth, mcpHandler);
+        // Claude.ai sends MCP requests to / (root) — handle them here too
+        app.all('/', bearerAuth, mcpHandler);
 
         // Global error handler
         app.use((err: any, _req: any, res: any, _next: any) => {
