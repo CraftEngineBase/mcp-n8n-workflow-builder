@@ -7,7 +7,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import express, { Request, Response } from 'express';
 import cors from 'cors';
@@ -1732,12 +1732,13 @@ class N8NWorkflowServer {
         app.use(mcpAuthRouter({
           provider: oauthProvider,
           issuerUrl: new URL(serverUrl),
+          resourceServerUrl: new URL('/mcp', serverUrl),
         }));
 
         // Bearer auth middleware for /mcp endpoint
         const bearerAuth = requireBearerAuth({
           verifier: oauthProvider,
-          resourceMetadataUrl: new URL('/.well-known/oauth-protected-resource', serverUrl).href,
+          resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(new URL('/mcp', serverUrl)),
         });
 
         // Streamable HTTP transport for MCP
